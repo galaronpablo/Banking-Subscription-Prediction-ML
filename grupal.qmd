@@ -1,0 +1,1797 @@
+---
+title: "Trabajo Grupal"
+format: 
+  html:
+    theme: united
+    embed-resources: true
+    toc: true
+    toc-location: right
+    toc-title: Índice
+    toc-depth: 10
+    code-fold: show
+    code-tools: true
+editor: visual
+author: Hugo Alonso, Gonzalo Blanca y Pablo Galarón 
+---
+
+## Librerías 📚
+
+```{r}
+#| echo: true       
+#| results: 'hide'  
+#| message: false   
+#| warning: false
+library(caret)
+library(car)
+library(purrr)
+library(furrr)
+library(dplyr)
+library(ggplot2)
+library(glmnet)
+library(performance)
+# Para paralelizar
+library(doParallel)
+library(tidyverse)
+library(tidyverse)
+library(lubridate)
+library(skimr)
+library(patchwork)
+library(class)
+library(dbscan)
+library(caret)
+library(gbm)
+library(pROC)
+library(dplyr)
+library(adabag)
+library(rpart.plot)
+library(iml)
+library(purrr)
+library(furrr)
+library(ggplot2)
+library(vcd)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(rattle)
+library(vcd)
+library(partykit)
+library(caret)
+library(gbm)
+library(pROC)
+library(dplyr)
+library(adabag)
+library(rpart.plot)
+library(iml)
+library(purrr)
+library(furrr)
+library(ggplot2)
+# Dado que la validación cruzada puede aprovechar los beneficios de la
+# paralelización, lo ponemos (si da problemas en tu ordenador, puedes obviarlo)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+library(naniar)
+library(psych)
+library(VIM)
+library(mice)
+library(pROC)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(randomForest)
+library(OOBCurve)
+library(furrr)
+library(iml)
+```
+
+## Carga de datos y seleccionar una muestra
+
+-   Cargamos los datos
+
+```{r}
+datos <- read_csv2("bank-full.csv")
+```
+
+## Requerimientos iniciales
+
+### Introducir día de la semana
+
+-   Introducir el día de la semana ya que puede resultar interesante para el análisis.
+
+```{r}
+datos <- datos |> 
+  mutate(
+    month_num = match(month, c("jan","feb","mar","apr","may","jun",
+                               "jul","aug","sep","oct","nov","dec"))
+  ) |> 
+  mutate(
+    year_shift = month_num < lag(month_num, default = first(month_num)),
+    year = 2008 + cumsum(year_shift)
+  ) |> 
+  mutate(
+    date_contact = dmy(paste(day, month, year, sep = "-")),
+    weekday = wday(date_contact, label = TRUE, abbr = FALSE)
+  )
+
+```
+
+### Seleccionamos muestra y mirar balanceo
+
+-   Seleccionamos una muestra de 10000 y que haga que mi variable objetivo este balanceada
+
+```{r}
+#separamos las clases
+minoritaria <- datos |>  filter(y == "yes")
+mayoritaria <- datos |>  filter(y == "no")  
+
+#calcular cuantas mayoritarias necesitamos
+n_min <- nrow(minoritaria)
+n_may_needed <- 10000 - n_min
+
+
+#muestra
+set.seed(12345)
+muestra <- bind_rows(
+  minoritaria,
+  sample_n(mayoritaria, n_may_needed)
+) |> 
+  slice_sample(prop = 1)
+```
+
+-   Comprobamos que esté balanceada
+
+```{r}
+table(muestra$y)
+prop.table(table(muestra$y))
+```
+
+-   Hemos corregido este desbalanceo.
+
+::: callout-important
+-   EN EL PDF HABLAR DE QUE NO PUEDE ESTAR DESBALANCEADA Y POR ESO HACEMOS ESTO
+:::
+
+### ¿Qué hacemos con pdays?
+
+```{r}
+hist(muestra$pdays)
+```
+
+```{r}
+muestra <- muestra |> 
+  mutate(prev_contact = if_else(pdays == -1, "no", "yes")) 
+```
+
+::: callout-important
+-   COMENTAR ESTO EN EL PDF, merece la pena quitarse esta variable desde luego.
+:::
+
+## Depuración de datos
+
+### Recodificación de variables
+
+```{r}
+str(muestra)
+```
+
+-   Recodificamos
+
+```{r}
+muestra <- muestra |> 
+  mutate(
+    job       = factor(job),
+    marital   = factor(marital),
+    education = factor(education),
+    default   = factor(default),
+    housing   = factor(housing),
+    loan      = factor(loan),
+    contact   = factor(contact),
+    month     = factor(month, 
+                       levels = c("jan","feb","mar","apr","may","jun",
+                                  "jul","aug","sep","oct","nov","dec")),
+    poutcome  = factor(poutcome),
+    y         = factor(y, levels = c("no", "yes")),
+    prev_contact = factor(prev_contact, levels = c("no","yes")), 
+    weekday = factor(weekday, 
+                     levels = c("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"), 
+                     ordered = FALSE)
+  )
+
+```
+
+-   Comprobamos que esté todo bien
+
+```{r}
+str(muestra)
+```
+
+-   Quitamos year_shift, date_contact, year y pdays que son variables intermedias para tener otras y que no creemos que aporten información útil al modelo.
+
+```{r}
+muestra <- 
+  muestra |> 
+  select(-year_shift, -date_contact, -year, -pdays, -month_num)
+```
+
+-   Volvemos a comprobar que esté todo bien:
+
+```{r}
+str(muestra)
+```
+
+```{r}
+summary(muestra)
+```
+
+### Detección de errores
+
+```{r}
+summary(muestra)
+```
+
+Detectamos muy pocos registros en sábado y domingo (5 y 4). Pueden corresponder a errores de grabación temporal o llamadas excepcionales del banco. No se suele llamar los fines de semana. No parece haber más errores iniciales.
+
+### Detección de outliers
+
+```{r}
+source("Funcion_atipicos.R")
+
+numeric_integer_vars <- names(which(sapply(muestra, is.numeric) | sapply(muestra, is.integer)))
+# Aplicar la función 'outliers' a cada una de las variables numéricas
+outliers_results <- lapply(numeric_integer_vars, function(var) {
+  outliers(muestra, var)  # Llamar a la función pasando el nombre de la variable
+})
+```
+
+##### Variable Age
+
+📌 Outliers identified in age : 147 outliers 📊 Proportion (%) of outliers: 1.47 %
+
+🚨 Extreme values identified in age : 0 extreme values 📊 Proportion (%) of extreme values: 0 %
+
+```{r}
+#outliers
+outlier_values_age <- boxplot.stats(muestra$age)$out 
+outlier_values_age
+
+out_ind_age <- which(muestra$age %in% c(outlier_values_age))
+out_ind_age
+```
+
+```{r}
+#extremos
+extreme_values_age <- boxplot.stats(muestra$age,coef=3)$out
+extreme_values_age
+
+ext_ind_age <- which(muestra$age %in% c(extreme_values_age))
+ext_ind_age
+```
+
+No los quitamos porque ademas son outliers y no extremos. Forman parte de una distribucuion asimetrica, son datos útiles que no podemos quitar porque nos interesan y queremos trabajar con ellos. El % además es del 1,47%. No los quitamos.
+
+##### Variable balance
+
+📌 Outliers identified in balance : 954 outliers 📊 Proportion (%) of outliers: 9.54 %
+
+🚨 Extreme values identified in balance : 465 extreme values 📊 Proportion (%) of extreme values: 4.65 %
+
+```{r}
+#outliers
+outlier_values_bal <- boxplot.stats(muestra$balance)$out 
+outlier_values_bal
+
+out_ind_bal <- which(muestra$balance %in% c(outlier_values_bal))
+out_ind_bal
+```
+
+```{r}
+#extremos
+extreme_values_bal <- boxplot.stats(muestra$balance,coef=3)$out
+extreme_values_bal
+
+ext_ind_bal <- which(muestra$balance %in% c(extreme_values_bal))
+ext_ind_bal
+```
+
+```{r}
+ggplot(muestra, aes(x = job, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = marital, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = education, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = default, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = housing, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = loan, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = contact, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = month, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = poutcome, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = y, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = weekday, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = prev_contact, y = balance)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+aunque no haya relaciones los dejamos por porcentajes altos.
+
+##### Variable duration
+
+📌 Outliers identified in duration : 523 outliers 📊 Proportion (%) of outliers: 5.23 %
+
+🚨 Extreme values identified in duration : 91 extreme values 📊 Proportion (%) of extreme values: 0.91 %
+
+```{r}
+#outliers
+outlier_values_dur <- boxplot.stats(muestra$duration)$out 
+outlier_values_dur
+
+out_ind_dur <- which(muestra$duration %in% c(outlier_values_dur))
+out_ind_dur
+```
+
+```{r}
+#extremos
+extreme_values_dur <- boxplot.stats(muestra$duration,coef=3)$out
+extreme_values_dur
+
+ext_ind_dur <- which(muestra$duration %in% c(extreme_values_dur))
+length(ext_ind_dur)
+```
+
+```{r}
+ggplot(muestra, aes(x = job, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = marital, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = education, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = default, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = housing, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = loan, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = contact, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = month, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = poutcome, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = y, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = weekday, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = prev_contact, y = duration)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+dejamos los outliers por el porcentaje y relacion con variable objetivo. Los extremos los quitamos porque son u porcentaje muy raro y ta esq no son distribucun asimetrica sinoq eu son muy raros.
+
+##### Variable campaign
+
+📌 Outliers identified in campaign : 499 outliers 📊 Proportion (%) of outliers: 4.99 %
+
+🚨 Extreme values identified in campaign : 213 extreme values 📊 Proportion (%) of extreme values: 2.13 %
+
+```{r}
+#extremos
+extreme_values_cam <- boxplot.stats(muestra$campaign,coef=3)$out
+extreme_values_cam
+
+ext_ind_cam <- which(muestra$campaign %in% c(extreme_values_cam))
+ext_ind_cam
+length(ext_ind_cam)
+```
+
+```{r}
+ggplot(muestra, aes(x = job, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = marital, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = education, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = default, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = housing, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = loan, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = contact, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = month, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = poutcome, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = y, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = weekday, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = prev_contact, y = campaign)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+duda pero qiitar extremos porque es poco % y no vemos relaciones. En todo caso con month pero erían los outliers.
+
+#### Variable previous
+
+📌 Outliers identified in previous : 1178 outliers 📊 Proportion (%) of outliers: 11.78 %
+
+🚨 Extreme values identified in previous : 554 extreme values 📊 Proportion (%) of extreme values: 5.54 %
+
+```{r}
+ggplot(muestra, aes(x = job, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = marital, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = education, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = default, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = housing, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = loan, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = contact, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = month, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = poutcome, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = y, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = weekday, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+ggplot(muestra, aes(x = prev_contact, y = previous)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+no los quitamos por alto porcentaje y porr la relacion con ariable default y prev_contact. la gente que no tiene creditos le contactan mas
+
+#### quitamos los outliers
+
+```{r}
+muestra$campaign[ext_ind_cam]<-NA
+
+muestra$duration[ext_ind_dur]<-NA
+```
+
+```{r}
+summary(muestra)
+```
+
+## Tratamiento de ausentes
+
+-   Gráficamente
+
+```{r}
+gg_miss_var(muestra, show_pct = TRUE)
+```
+
+```{r}
+vis_miss(muestra)
+```
+
+```{r}
+n_miss(muestra)
+```
+
+```{r}
+pct_complete_case(muestra)
+```
+
+Perderiamos el 3,4% de la base de datos.
+
+En el proceso de depuración se identificaron valores extremos anómalos en dos variables, los cuales representaban aproximadamente un 3% del total de 10.000 observaciones. Dado que estos registros correspondían a datos claramente aberrantes y no plausibles, y considerando que su eliminación suponía una pérdida mínima de información sin afectar la potencia del análisis, se optó por descartarlos. Esta decisión evita la introducción de sesgos derivados de imputar valores poco representativos (como la media) y permite trabajar con una muestra más coherente y consistente para la posterior construcción del modelo de aprendizaje supervisado.
+
+```{r}
+muestra_dep <- 
+  muestra |> 
+  drop_na()
+```
+
+-   Comprobamos que esté balanceada
+
+```{r}
+table(muestra_dep$y)
+prop.table(table(muestra_dep$y))
+```
+
+## Mejor modelo glm
+
+### Niveles y recodificación
+
+```{r}
+muestra_dep <-
+  muestra_dep |>
+mutate(y = ifelse(y == 'yes',1, 0))
+```
+
+```{r}
+muestra_dep |> distinct(y)
+```
+
+```{r}
+muestra_dep$y<-as.factor(make.names(muestra_dep$y))
+table(muestra_dep$y)/nrow(muestra_dep)
+```
+
+```{r}
+str(muestra_dep)
+```
+
+### Train y test
+
+```{r}
+muestra_dep_reord <- muestra_dep[sample(nrow(muestra_dep)),]
+
+set.seed(12345)
+trainIndex <- createDataPartition(muestra_dep_reord$y, p=0.8, list=FALSE)
+data_train <- muestra_dep_reord[trainIndex,]
+data_test <- muestra_dep_reord[-trainIndex,]
+```
+
+### Primer modelo
+
+```{r}
+modeloInicial<-glm(y~., data=data_train, family=binomial)
+```
+
+-   Número de parámetros
+
+```{r}
+modeloInicial$rank #parámetros del modelo
+```
+
+```{r}
+summary(modeloInicial)
+```
+
+-   Parámetros significativos al 5%:
+
+jobblue-collar
+
+jobretired
+
+jobself-employed
+
+jobstudent
+
+jobunknown (marginal al 10%, pero NO al 5% → no se incluye)
+
+educationsecondary
+
+educationtertiary
+
+educationunknown
+
+balance
+
+housingyes
+
+loanyes
+
+contactunknown
+
+monthfeb
+
+monthmar
+
+monthapr
+
+monthmay
+
+monthjun
+
+monthaug
+
+monthsep
+
+monthoct
+
+monthnov
+
+monthdec
+
+duration
+
+campaign
+
+poutcomesuccess
+
+weekdaymartes
+
+weekdayviernes
+
+weekdaysábado
+
+### Análisis de tipo 2
+
+-   Es un proceso iterativo que consiste en ir eliminando una a una las variables del modelo y evaluar el modelo observando como se comporta el modelo sin esa variable. Si prescindo de ella, ¿afecta mucho al modelo si prescindo de ella? **El análisis de tipo II evalúa la utilidad de las variables de una en una, con respecto al modelo global.**
+
+::: callout-tip
+-   Buscamos modelos que sean sencillos y que funcionen bien. Si un modelo con muchas variables funciona igual que un modelo con 3 variables, escogemos el de 3 variables porque es un modelo más sencillo. Hay que ver el equilibrio entre calidad en el ajuste y complejidad. Eso es un poco lo que miramos en el análisis de tipo II.
+:::
+
+```{r}
+# Modelo inicial
+modeloInicial <- glm(y ~ ., data = data_train, family = binomial)
+
+Anova(modeloInicial, type = "II")
+
+
+# Quitamos day
+modeloInicial <- glm(y ~ . - day, data = data_train, family = binomial)
+
+Anova(modeloInicial, type = "II")
+
+
+# Quitamos prev_contact
+modeloInicial <- glm(y ~ . - day - prev_contact, data = data_train, family = binomial)
+
+Anova(modeloInicial, type = "II")
+
+
+# Quitamos previous
+modeloInicial <- glm(y ~ . - day - prev_contact - previous, data = data_train, family = binomial)
+
+Anova(modeloInicial, type = "II")
+
+
+# Quitamos age
+modeloInicial <- glm(y ~ . - day - prev_contact - previous - age, data = data_train, family = binomial)
+
+Anova(modeloInicial, type = "II")
+
+
+# Quitamos default
+modeloInicial <- glm(y ~ . - day - prev_contact - previous - age - default, data = data_train, family = binomial)
+
+Anova(modeloInicial, type = "II")
+
+```
+
+::: callout-warning
+-   Está conclusión no es del todo cierta ya que este proceso para que sea efectivo y esté bien hecho ha de hacerse **de manera univariante.** Quitas una y miras como se comporta el modelo sin ella, si empeora la añades otra vez, si mejora no la añades, así sucesivamente. Para hacer el ejercico más sencillo y no demorarse mucho las quitamos de golpe, alomejor se llega al mismo punto de las dos maneras.
+:::
+
+-   Construimos el modelo que hemos obtenido con todas las variables significativas.
+
+```{r}
+modelo2 <- glm(
+  y ~ job + marital + education + balance + housing + loan +
+      contact + month + duration + campaign + poutcome + weekday,
+  data = data_train,
+  family = binomial
+)
+
+modelo2$rank
+```
+
+### métodos de selección automática
+
+```{r}
+null<-glm(y~1,data=data_train, family=binomial)
+full<-glm(y~.,data=data_train, family=binomial)
+modeloStepBIC<-step(null, scope=list(lower=null, upper=full), direction="both",
+                    k=log(nrow(data_train)), trace=F)
+modeloStepAIC<-step(null, scope=list(lower=null, upper=full), direction="both",
+                    k=2, trace=F)
+modeloForwBIC<-step(null, scope=list(lower=null, upper=full), direction="forward",
+                    k=log(nrow(data_train)),trace=F)
+modeloForwAIC<-step(null, scope=list(lower=null, upper=full), direction="forward",
+                    k=2, trace=F)
+modeloBackBIC<-step(full, scope=list(lower=null, upper=full), direction="backward",
+                    k=log(nrow(data_train)),trace=F)
+modeloBackAIC<-step(full, scope=list(lower=null, upper=full), direction="backward",
+                    k=2, trace=F)
+```
+
+-   Una vez obtenidos los 6 posibles modelos, los incluimos en una lista y obtenemos su fórmula y el número de parámetros que los contienen (esto último puede resultar de utilidad para detectar si los modelos se han repetido).
+
+```{r}
+modelos<-list(modeloStepBIC,modeloStepAIC,modeloForwBIC,modeloForwAIC,modeloBackBIC, modeloBackAIC)
+map(modelos,function(x) formula(x)) 
+```
+
+```{r}
+map_int(modelos,function(x) x$rank)
+```
+
+> Hemos encontrado 2 modelos diferentes:
+
+-   modeloStepBIC: y \~ duration + month + poutcome + contact + housing + campaign + loan + education + marital
+
+-   modeloStepAIC: y \~ duration + month + poutcome + contact + housing + job + campaign + loan + education + weekday + marital + balance + default
+
+```{r}
+map(modelos,function(x) sort(names(coef(x)))) 
+```
+
+::: callout-important
+-   La principal diferencia que observo, está en la complejidad del modelo o también dicho de otra forma en el número de parámetros de cada modelo. Estos modelos tienen ambos una penalización, que quiere decir que no vamos a estar añadiendo variables al modelo porque sí, si quieren estar tienen que mejorar significativamente el modelo. El criterio BIC penaliza mucho más la complejidad, es más agresivo seleccionando variables ya que si $n$ crece, $log(n) > 2$(penaliza más el sobreajuste) y además depende del tamaño muestral. Es por ello que en los modelos BIC tengo 26 parámetros mientras que en los AIC tengo 45 parámetros.
+:::
+
+### Aplicamos validación cruzada sobre estos modelos y el calculado de manera manual.
+
+Aplicamos validación cruzada ahora sobre estos modelos. Lo hacemos así porque si no quisieramos hacer bic o aic sería imposible hacer validación cruzada para cada iteración de cada método, computacionalmente sería muy muy costoso. Por eso recurrimos a estos métodos de selección automática de variables y después aplicamos validación cruzada una vez terminado el proceso para evaluar el modelo y seleccionar con cual nos quedamos.
+
+```{r}
+modelos<-list(modeloStepBIC, modeloStepAIC, modelo2)
+vcrTodosModelos<-list()
+for (i in 1:length(modelos)){
+  set.seed(12345)
+  vcr<-train(formula(modelos[[i]]), data = data_train,
+           method = "glm", family="binomial",
+           trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                                    summaryFunction=multiClassSummary, 
+                                    classProbs=TRUE, savePredictions = TRUE)
+)
+  vcrTodosModelos[[i]]<-vcr
+}
+names(vcrTodosModelos)<-paste0("Model",1:length(modelos), "_",sapply(modelos,function(x) x$rank))
+bwplot(resamples(vcrTodosModelos), metric=c("AUC", "Kappa", "Accuracy"),
+       scales = list(x = list(relation = "free")))
+```
+
+```{r}
+summary(resamples(vcrTodosModelos), metric=c("AUC", "Kappa", "Accuracy"))
+```
+
+::: callout-important
+> A la hora de evaluar un modelo vamos a tener en cuenta tres aspectos:
+
+-   **Modelos con capacidad predictiva alta**: estas tres métricas tienen que tomar valores altos.
+
+-   **Modelos estables**: que funcionen igual de bien en todas las particiones o "folds" de la validación cruzada.
+
+-   **Modelos que sigan el principio de parsimonia**: que sean sencillos pero sin perder capacidad predictiva, que no sean complejos sin una debida justificación.
+:::
+
+-   Ahora es más complejo de elegir porque tenemos tres métricas, de las tres, la más importante es el AUC, es siempre más fiable porque no depende del punto de corte.
+
+-   En este caso los tres modelos que estamos evaluando son muy parecidos en cuanto a variabilidad, el tamaño de la caja, los bigotes y los puntos de datos atípicos. Por tanto nos quedamos con el modelo más sencillo siguiendo el principio de parsimonia. El modelo 1 el de stepBIC es con el que nos quedaríamos ya que no merece para nada la pena la mejora que produce aumentar casi 20 parámetros extra.
+
+### Matriz confusión en train y test
+
+- Train:
+
+```{r}
+probs_train <- predict(modeloStepBIC, data_train, type="response") #sacamos las predicciones que son PROBABILIDADES
+cm_train <- confusionMatrix(
+  data = as.factor(ifelse(probs_train >= 0.5, "X1", "X0")),
+  reference = data_train$y,
+  positive = "X1"
+)
+
+#matriz de confusión
+cm_train$table
+cm_train$overall[1:2]
+#sensibilidad y especificidad
+cm_train$byClass[1:2]
+```
+```{r}
+#AUC
+curvaROC_train<-roc(data_train$y, probs_train)
+curvaROC_train$auc
+plot(curvaROC_train)
+```
+
+
+- TEST
+
+```{r}
+probs_test <- predict(modeloStepBIC, data_test, type="response") #sacamos las predicciones que son PROBABILIDADES
+cm_test <- confusionMatrix(
+  data = as.factor(ifelse(probs_test >= 0.5, "X1", "X0")),
+  reference = data_test$y,
+  positive = "X1"
+)
+
+#matriz de confusión
+cm_test$table
+```
+
+```{r}
+#tasa de acierto y índice kappa
+cm_test$overall[1:2]
+```
+
+-   En cuánto a la tasa de acierto el porcentaje de casos en los que el modelo acertó prediciendo la clase correcta es del 82%. Lo que predice el modelo se corresponde con la realidad en un 82% de los casos. Otra manera de decirlo: La tasa de acierto (accuracy) del modelo es del 82%, lo que significa que en 8,2 de cada 10 casos las predicciones coinciden con la clase real.
+
+-   En cuánto al índice kappa, si mi modelo no tiene en cuenta lo que acierta por la frecuencia de clases, 6,5 veces de cada 10 casos las predicciones del modelo coinciden con la realidad. Le quitamos ese azar, el azar significa lo que mi modelo está acertando únicamente por la distribución de clases.
+
+```{r}
+#sensibilidad y especificidad
+cm_test$byClass[1:2]
+```
+
+-   En cuánto a la sensibilidad, me mide la capacidad que tiene el modelo de detectar positivos reales. Es decir, la capacidad que tiene de predecir 1 y que en la realidad sean 1. En este caso, el modelo detecta aprox el 81% de los casos que realmente son 1.
+
+-   En cuánto a la especificidad, me mide la capacidad que tiene mi modelo de detectar negativos reales. Es decir de los que mi modelo predice 0, que proporción de ellos son 0 en la realidad. En este caso, el modelo es capaz de detectar aprox el 84% de los negativos reales. Es decir, hay un 16% que se le escapa, estamos teniendo algunos falsos positivos, mi modelo predice algunos 1 que en realidad se corresponden con un 0. Estas dos medidas están muy equilibradas por lo que alomejor no sería necesario cambuar el punto de corte.
+
+```{r}
+#AUC
+curvaROC_test<-roc(data_test$y, probs_test)
+curvaROC_test$auc
+plot(curvaROC_test)
+```
+
+Pero la medida más importante para evaluar la calidad del modelo es el AUC. En este caso en train era de 0.7 y pico y ahora en test es de 0.74, muy muy parecido. Por tanto, el modelo es estable, sabe generalizar, no memoriza, no está sobre ajustado. En cuanto a si es bueno o no pues está bastante bien, no es estupendo pero tampoco es como si tiraramos una moneda. La probabilidad de que mi modelo asigne éxito o 1 a probablidades más altas es del 70%, no está del todo mal, es un modelo correcto.
+
+::: callout-warning
+-   Como mi clase estaba balanceada seguramente que no nos toque cambiar el punto de corte
+
+-   **CUIDADO: El punto de corte lo tengo que elegir usando los datos de entrenamiento, porque si lo ajusto con los de test en realidad estoy entrenando con ellos. El test lo dejo guardado solo para comprobar al final cómo de bien funciona el modelo de verdad.**
+
+```{r}
+probs_train <-predict(modeloStepBIC, data_train, type="response")
+curvaROC_train<-roc(data_train$y, probs_train)
+(mejorPtocorte<-as.numeric(coords(curvaROC_train, "best", best.method = "closest.topleft", ret = c("threshold"))))
+```
+
+```{r}
+cm_test <- confusionMatrix(
+  data = as.factor(ifelse(probs_test >= mejorPtocorte, "X1", "X0")),
+  reference = data_test$y,
+  positive = "X1"
+)
+#sensibilidad y especificidad
+cm_test$byClass[1:2]
+```
+
+-   Ahora están un poco más equilibradas pero la diferencia es mínima.
+:::
+
+### Importancia de variables
+
+```{r}
+Anova(modeloStepBIC, type = "II")
+```
+
+-   El análisis de tipo 2 ahora deja de tener sentido porque si ya tengo un modelo seleccionado, es absurdo preguntar si una variable es útil dentro de otro modelo general porque ese modelo ya habrá sido descartado porque se supone que ya tengo mi mejor modelo.
+
+-   Entonces, hacer un análisis tipo II después es redundante, sería como preguntar por la importancia de variables en un modelo más grande o diferente que ya hemos decidido que no es el mejor. Nos puede ser útil para hacer un ranking de variables, ver que variable aporta más al modelo. Miramos la columna de LR Chisq(el estadístico de la prueba de razón de verosimilitudes), cuan más grande es este valor, más aportación hace esa variable al modelo y al quitarla, empeoraría mucho mi modelo.
+
+> El orden de aportación es el siguiente:
+
+-   duration
+-   month
+-   poutcome
+-   contact
+-   housing
+-   campaign
+-   loan
+-   education
+-   marital
+
+### Interpretación de los odds-ratio:
+
+```{r}
+exp(coef(modeloStepBIC))
+```
+
+```{r}
+summary(modeloStepBIC)
+```
+
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 4.2 cuando la llamada se realiza en febrero frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 19 si la llamada se hace en marzo frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 5 cuando la llamada se realiza en abril frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo aumentan en un 98% cuando la llamada se hace en mayo frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 5.5 si la llamada se hace en junio frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo aumentan en un 30% cuando la llamada se realiza en julio frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo aumentan en un 69% cuando la llamada se realiza en agosto frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 17 si la llamada se realiza en septiembre frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 16.8 cuando la llamada se hace en octubre frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo aumentan en un 54% cuando la llamada se hace en noviembre frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 13.7 cuando la llamada se hace en diciembre frente a enero.
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 16 si la campaña anterior fue un éxito frente a que haya sido un fracaso.
+
+-   Las posibilidades de suscribir un depósito a plazo se reducen en un 13% cuando se desconoce el resultado de la campaña anterior frente a que haya sido un fracaso.
+
+-   Las posibilidades de suscribir un depósito a plazo aumentan en un 35% cuando el resultado anterior fue “other” frente a fracaso.
+
+-   Las posibilidades de suscribir un depósito a plazo se reducen en un 11% cuando el contacto se realiza por teléfono fijo frente a móvil.
+
+-   Las posibilidades de suscribir un depósito a plazo se reducen en un 90% cuando se desconoce el tipo de contacto frente a móvil.
+
+-   Las posibilidades de suscribir un depósito a plazo aumentan en un 34% si el cliente tiene educación secundaria frente a primaria.
+
+-   Las posibilidades de suscribir un depósito a plazo se multiplican por 1.8 si el cliente tiene educación superior frente a primaria.
+
+-   Las posibilidades de suscribir un depósito a plazo aumentan en un 52% cuando no se conoce el nivel educativo frente a primaria.
+
+-   Las posibilidades de suscribir un depósito a plazo se reducen en un 11% si el cliente está casado frente a divorciado.
+
+-   Las posibilidades de suscribir un depósito a plazo aumentan en un 14% si el cliente es soltero frente a divorciado.
+
+-   Las posibilidades de suscribir un depósito a plazo se reducen en un 58% si el cliente tiene hipoteca frente a no tenerla.
+
+-   Las posibilidades de suscribir un depósito a plazo se reducen en un 44% si el cliente tiene un préstamo personal frente a no tenerlo.
+
+-   Por cada llamada adicional durante la campaña, las posibilidades de suscribir un depósito a plazo se reducen en un 12%.
+
+-   Por cada segundo adicional de duración de la llamada, las posibilidades de suscribir un depósito a plazo aumentan en un 0.6%.
+
+### Lasso y Ridge
+
+-   Estos modelos buscan **penalizar los modelos clásicos.** No obstante, tienen como mismo objetivo maximizar la verosimilitud y añadir un término de penalización por complejidad.
+
+⬇️
+
+-   Los usamos cuando tenemos una base de datos con **multicolinealidad** o un **tamaño de muestra no muy grande.** Si aplicamos BIC O AIC si tenemos mucha multicolinealidad estos se van a bloquear porque ni siquiera saben por donde empezar el proceso iterativo. Por tanto los usamos para **evitar el sobreajuste y eliminar variables inecesarias.**
+
+⬇️
+
+-   Para ello, tenemos que reducir o eliminar y esto lo haremos con una **penalización** que llamaremos $\lambda$, donde si esta es 0 estamos en el modelo clásico pero si es infinito no tenemos modelo, por tanto tenemos que buscar un término medio. Para ello pasamos al proceso denominado **"afinación"** donde vamos a aplicar **validación cruzada** para obtener el $\lambda$ y $\alpha$ más óptimo.
+
+⬇️
+
+-   Cómo este proceso es aleatorio, para reducir las posibilidades de sobreajuste aún más recurrimos a la **"Regla 1se"** que dice lo siguiente: **"En lugar de quedarte con el modelo exacto que tiene mejor resultado, elige el modelo más simple cuyo rendimiento esté dentro de una desviación típica de ese óptimo".**
+
+$$
+\beta = \arg\max \left\{ \mathcal{L}(\beta) 
+- \lambda \left( 
+\alpha \sum_{i=1}^{t} |\beta_i| 
++ (1-\alpha) \sum_{i=1}^{t} \beta_i^2 
+\right) \right\}
+$$
+
+-   si $\alpha = 0$ -\> **RIDGE**(penalización cuadrática) -\>\> reduce pero no eliminamos. Funciona bien para eliminar la multicolinealidad.
+
+-   si $\alpha = 1$ -\>\> **LASSO**(penalización absoluta) -\>\> elimina poniendolos a cero. Funciona bien para seleccionar variables.
+
+-   $\alpha$ intermedio -\>\> **ELASTIC NET**(penalización mixta) -\>\> combina lo mejor de los dos modelos. Por ello al igual que con $\lambda$ aplicamos validación cruzada para obtener el valor más óptimo.
+
+```{r}
+y <- data_train$y
+x<-model.matrix(object = y ~., data=data_train)[,-1]
+```
+
+::: callout-warning
+-   La función glmnet no genera internamente la codificación mediante dummies para las variables categóricas, por lo que debemos llevar a cabo ese primer paso previamente (usamos la función model.matrix()).
+
+-   Estandariza por defecto. Se puede poner sino standardize=TRUE.
+:::
+
+-   **LASSO:**
+
+```{r}
+modeloLASSO<-glmnet(x, y, alpha = 1, family = "binomial")
+plot(modeloLASSO, xvar="lambda", sign.lambda = 1, main = "LASSO")
+```
+
+-   **RIDGE:**
+
+```{r}
+modeloRIDGE<-glmnet(x, y, alpha = 0, family = "binomial")
+plot(modeloRIDGE, xvar="lambda", sign.lambda = 1, main = "Ridge")
+```
+
+::: callout-important
+-   Aquí estamos representando la **evolución del valor de todos los parámetros** a **medida que aumenta la penalización**. Cada **parámetro** se representa con **un color** y el **eje x superior** muestra el **número de parámetros no nulos**.
+:::
+
+-   Como era de esperar, la **magnitud de los parámetros disminuye a medida que aumenta la penalización.**
+
+-   En el caso de **Ridge**, los coeficientes se **reducen de forma notable** con penalizaciones más grandes, pero **nunca** llegan exactamente a **0**, por lo que ninguna variable se elimina del modelo.
+
+-   Esto refleja lo que comentábamos en el marco teórico: **Ridge encoge los parámetros**, incluso de manera más rápida y drástica que Lasso, pero mantiene todas las variables dentro del modelo.
+
+-   En cambio, con **Lasso**, además de reducir las magnitudes de los coeficientes, **algunos se llevan exactamente a 0**, lo que equivale a eliminarlos del modelo y realizar selección de variables.
+
+#### cv lambda para alpha fijo
+
+**PARA LASSO**:
+
+-   Vamos a aplicar una función que aplique validación cruzada para un alpha ya fijado y que nos diga el mejor valor de lambda(la penalización). El valor óptimo para obtener un buen AUC y un modelo parsimonioso.
+
+```{r}
+set.seed(1234)
+cv.lasso <- cv.glmnet(x, y, nfolds=5, family = "binomial", alpha = 1,
+                      type.measure="auc", parallel = T)
+plot(cv.lasso, sign.lambda = 1)
+```
+
+-   El gráfico muestra que, a partir de unos 23 parámetros, el AUC prácticamente se estabiliza (los puntos rojos se estabilizan).
+
+-   La línea vertical de la izquierda corresponde al valor de $\lambda_{\min}$, es decir, el que **maximiza el AUC promedio en la validación cruzada.**
+
+```{r}
+cv.lasso$lambda.min
+```
+
+-   Sin embargo, según la **regla 1-SE**, no siempre nos quedamos con el modelo “óptimo exacto”, sino con el **modelo más simple** cuyo rendimiento **esté dentro de una desviación estándar del mejor.**
+
+-   Ese valor de $\lambda$ viene dado por la línea vertical de la derecha ($\lambda_{1se}$), lo que nos proporciona un modelo más parsimonioso, con menos parámetros, pero prácticamente igual de bueno en términos de rendimiento (AUC).
+
+```{r}
+cv.lasso$lambda.1se
+```
+
+-   **COMPARACIÓN DE EL RENDIMIENTO DEL MODELO PARA CADA LAMBDA:**
+
+```{r}
+cv.lasso$cvm[cv.lasso$index] # Media en validación cruzada
+cv.lasso$cvsd[cv.lasso$index] # Error estandar en validación cruzada
+cv.lasso$cvlo[cv.lasso$index] # Media - error estandar
+```
+
+Como vemos la diferencia entre un lambda y otro es mínima, elegimos el de la regla 1se, prácticamente igual en rendimiento y mucho más sencillo.
+
+#### cv paa cualquier alpha y lamda
+
+```{r}
+future::plan(multisession, workers=detectCores() - 1) #pararelizar 
+alphas<-seq(0,1,by=0.1) #secuencia de alphas posibles que tenemos
+
+tunningEnet<- future_map(alphas, 
+                         ~ {set.seed(12345);
+                           cv.glmnet(x, y, nfolds = 5, family = "binomial", alpha = .x, type.measure="auc")}
+                         )
+plan(sequential)
+```
+
+-   El resultado de este código es una lista con tantos elementos como valores de $\alpha$ quremos probar, donde cada elemento es un objeto cv.glmnet.
+
+-   Metemos es esta info en un dataframe y calculamos el valor del AUC para la aplicación de la regla 1se y representamos de nuevo gráficamente.
+
+```{r}
+resultado <- map_df(1:length(alphas),
+                    function(x) {
+                      data.frame(
+                        alpha = alphas[x],
+                        lambda = tunningEnet[[x]]$lambda,
+                        log_lambda = log(tunningEnet[[x]]$lambda),
+                        numPar = tunningEnet[[x]]$nzero,
+                        auc_cv = tunningEnet[[x]]$cvm,
+                        auc_sd = tunningEnet[[x]]$cvsd,
+                        auc_lo = tunningEnet[[x]]$cvlo
+                      )
+                    }
+)
+
+auc_1se<- resultado |>
+  slice_max(auc_cv, n=1) |> pull(auc_lo)
+
+ggplot(data=resultado, aes(x=log_lambda, y=auc_cv, col=as.factor(alpha)))+
+  geom_line()+
+  geom_point() +
+  geom_hline(yintercept = auc_1se)
+```
+
+::: callout-important
+-   Cada **puntito representa un valor de** $\lambda$ y cada **color un** $\alpha$ distinto. La penalización empieza muy baja y ahí todos los modelos tienen un auc muy bueno, a medida que aumenta la penalización, el auc va bajando hasta que llega un punto que la penalización es tan grande que el rendimiento del modelo se desploma. Hay que buscar un **equilibrio** entre la penalización(**cuanto más grande, más parámetros son 0, modelo más sencillo**) y un buen rendimiento(auc alto), este lo establece la **regla 1se** que es la **línea negra** que tenemos dibujada. En esa línea negra, toda combinación de alphas y lambdas será la más óptima en cuanto a rendimiento y simplicidad(es como ese precipicio de antes de caer al vacío).
+:::
+
+-   A excepción del modelo ridge($\alpha = 0$) y las mayores penalizaciones, no existen grandes diferencias en los modelos probados. El mejor AUC es de 0.74, mientras que el límite de la regla 1se(línea negra del gráfico) se encuentra en 0.72, están muy muy parecidos, eso es bueno. Muchos modelos superan ese umbral, por lo que buscaremos aquella combinación de parámetros que **implique una cantidad menor de parámetros** y con **una estabilidad en validación cruzada.**
+
+```{r}
+resultado |>
+  filter(auc_cv>=auc_1se) |> slice_min(numPar) |> arrange(auc_sd)
+```
+
+-   **Este código elige, entre los modelos que cumplen la regla 1se, el más simple (menos parámetros) y, si hay empate, los ordena para quedarse con el más estable (menor desviación en CV).**
+
+-   **NOS QUEDAMOS CON EL PRIMERO CUYO AUC ES : 0.9041504**
+
+```{r}
+modelo_defi <- glmnet(x,y, family = "binomial", alpha = 1, lambda =0.0138)
+exp(coef(modelo_defi))
+```
+
+
+```{r}
+x_test<-model.matrix(y~., data=data_test)[,-1]
+probs_test_enet <-predict(modelo_defi, x_test, type="response")
+
+
+cm_test_enet<-confusionMatrix(data=as.factor(ifelse(probs_test_enet>=0.5,
+                                                    "X1","X0")),
+                              reference=data_test$y, positive="X1")
+cm_test_enet$table
+```
+
+```{r}
+curvaROC_test_enet<-roc(data_test$y, probs_test_enet)
+curvaROC_test_enet$auc
+```
+
+
+```{r}
+set.seed(12345)
+cv_glmnet <- train(
+  x = x,
+  y = y,
+  method = "glmnet", family = "binomial",
+  tuneGrid=expand.grid(.alpha=1,.lambda=0.0138),
+  preProc = c("center", "scale"), 
+  trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                         summaryFunction=multiClassSummary, classProbs=TRUE,
+                         savePredictions = TRUE)
+)
+summary(cv_glmnet$resample[,c("AUC","Accuracy", "Kappa")])
+```
+
+
+
+```{r}
+set.seed(12345)
+cv_glmnet <- train(
+  x = x,
+  y = y,
+  method = "glmnet", family = "binomial",
+  tuneGrid=expand.grid(.alpha=0.9,.lambda=0.05686644),
+  preProc = c("center", "scale"), 
+  trControl = trainControl(method="repeatedcv", number=5, repeats=20,
+                         summaryFunction=multiClassSummary, classProbs=TRUE,
+                         savePredictions = TRUE)
+)
+summary(cv_glmnet$resample[,c("AUC","Accuracy", "Kappa")])
+```
+
+
+## Árbol de clasificación inicial
+
+Para comenzar con el analisis vamos a crear un arbol al 5% para ver como seria un arbol con todas las variables disponibles.
+
+```{r}
+modeloClasif5<-rpart(y~., data=data_train, method = "class", 
+                  minbucket=ceiling(0.05*nrow(data_train)),cp=0,
+                  maxsurrogate = 0)
+```
+
+```{r}
+sum(modeloClasif5$frame$var == "<leaf>")
+max(rpart:::tree.depth(as.numeric(rownames(modeloClasif5$frame))))
+```
+
+Observamos que el árbol de clasificación con un tamaño de hoja del 5 % genera un total de siete hojas y presenta una profundidad de cinco niveles. A continuación, lo representaremos para analizar su estructura.
+
+```{r}
+rpart.plot(modeloClasif5,extra=105,nn=TRUE,tweak=1.2)
+```
+
+Para ver las variables y puntos de corte que ha ido escogiendo el modelo podemos usar la funcion asRules.
+
+```{r}
+asRules(modeloClasif5)
+```
+
+La hoja 12, que recoge un 5 % de las observaciones, reúne casos con llamadas de duración media y con contacto unknown, y apenas llega a un 8 % de respuestas positivas, así que es un grupo que casi siempre termina en un “no”. La hoja 27, que tiene un 7 % de las observaciones, es todo lo contrario: muestra una probabilidad muy alta de “sí” (92 %) cuando la llamada dura entre 206.5 y 440.5 segundos, el contacto es por teléfono o móvil y ocurre en meses como marzo, junio o septiembre. Por último, la hoja 7 es la más grande, con un 30 % de las observaciones, y corresponde a llamadas muy largas (más de 440.5 segundos), donde la probabilidad de éxito sube al 84 %, mostrando que cuando la llamada se alarga, es mucho más fácil obtener un “sí”.
+
+A la hora de realizar el análisis y escoger el mejor árbol de clasificación, vamos a elaborar cuatro modelos distintos. Estos se diferenciarán por el tamaño de la hoja, que se fijará en 0.05%, 1 %, 2 % y 10 %.
+
+```{r}
+set.seed(12345)
+modeloClasif05<-rpart(y~., data=data_train, method = "class", 
+                  minbucket=ceiling(0.005*nrow(data_train)),cp=0,
+                  maxsurrogate = 0)
+modeloClasif1<-rpart(y~., data=data_train, method = "class", 
+                  minbucket=ceiling(0.01*nrow(data_train)),cp=0,
+                  maxsurrogate = 0)
+modeloClasif2<-rpart(y~., data=data_train, method = "class", 
+                  minbucket=ceiling(0.02*nrow(data_train)),cp=0,
+                  maxsurrogate = 0)
+
+
+modeloClasif10<-rpart(y~., data=data_train, method = "class", 
+                  minbucket=ceiling(0.10*nrow(data_train)),cp=0,
+                  maxsurrogate = 0)
+
+
+modelos<-list(modeloClasif05,modeloClasif1,modeloClasif2,modeloClasif5,modeloClasif10)
+
+```
+
+Evaluamos todos los modelos para ver cual es el mas indicado para podar.Un modelo ideal para podar es aquel que tenga sobreajuste y un gran numero de hojas.
+
+```{r}
+sapply(modelos,
+       function(x) multiclass.roc(data_train$y,
+                       predict(x,data_train,type="prob"))$auc)
+```
+
+```{r}
+sapply(modelos,
+       function(x) multiclass.roc(data_test$y,
+                       predict(x,data_test,type="prob"))$auc)
+```
+
+```{r}
+sapply(modelos,function(x) sum(x$frame$var == "<leaf>"))
+```
+
+Lo ideal sería podar el más grande en este caso porque al pasar de 17 a 31 hojas, se ve que el modelo tiene la capacidad de aumentar el AUC en test en 0.02, por lo que algo de información podrían contener esas hojas adicionales. De todas formas, si nos ponemos estrictos, en el gráfico de la poda que me mandáis también podría argumentarse quedarnos con un árbol de 12 hojas, pues no se aleja apenas de la línea (lo que coincidiría con haber podado el árbol del 1%).  
+
+```{r}
+plotcp(modeloClasif05, las=2)
+lines(modeloClasif05$cptable[,3],col="red", type = "b")
+```
+
+```{r}
+set.seed(12345)
+modeloClasif05<-rpart(y~., data=data_train, method = "class", 
+                  minbucket=ceiling(0.005*nrow(data_train)), cp=0,
+                  maxsurrogate = 0)
+set.seed(12345)
+CVresults<-xpred.rpart(modeloClasif05, return.all =T)
+```
+
+Vamos a analizar para distintos tamaños de arboles su auc y kappa
+
+```{r}
+aucCV<-c()
+kappaCV<-c()
+for (i in 2:dim(CVresults)[2]){
+  aux<-CVresults[,i,2:(dim(CVresults)[3]-1)]/CVresults[,i,(dim(CVresults)[3])]
+  colnames(aux)<-levels(data_train$y)
+  aucCV<-c(aucCV, multiclass.roc(data_train$y, aux)$auc)
+  kappaCV<-c(kappaCV,Kappa(table(factor(CVresults[,i,1],1:length(levels(data_train$y))),data_train$y))$Unweighted[1])
+}
+plot(modeloClasif05$cptable[-1,2]+1, aucCV, type="b", xlab = "Número de hojas")
+```
+
+Vemos que el AUC alcanza un valor bastante alto cuando el árbol tiene unas 16 hojas. A partir de ese punto, el AUC sigue aumentando ligeramente conforme añadimos más hojas, algo esperable porque el modelo empieza a sobreajustarse: cuanto más complejo es el árbol, mejor se adapta a los datos de entrenamiento, aunque eso no implique una mejora real en su capacidad de generalización.
+
+```{r}
+plot(modeloClasif05$cptable[-1,2]+1, kappaCV, type="b", xlab = "Número de hojas")
+```
+
+En el gráfico de Kappa se observa que el valor aumenta de manera constante hasta llegar a unas 16 hojas, donde alcanza su punto máximo. A partir de ahí, añadir más hojas no mejora el rendimiento e incluso provoca pequeñas oscilaciones que indican sobreajuste. Por tanto, el mejor equilibrio entre complejidad y capacidad predictiva del modelo se obtiene con 16 hojas, que es donde Kappa alcanza su valor óptimo.
+
+Por lo tanto ya tenemos el modelo final , este sera el que vayamos a podar.
+
+```{r}
+# Escribimos manualmente el cp copiado del plotcp()
+modeloClasif005podado <- prune(modeloClasif05, cp = 0.0034)
+rpart.plot(modeloClasif005podado,extra=105,nn=TRUE,tweak=1.2)
+```
+
+### Evaluacion del modelo
+
+- MATRIZ TRAIN:
+
+```{r}
+probs <-predict(modeloClasif005podado, data_train, type="prob")
+cm<-confusionMatrix(predict(modeloClasif005podado, newdata=data_train, type="class"),data_train$y)
+
+#Matriz de confusión
+cm$table
+#Accuracy y Kappa
+cm$overall[1:2]
+#Sensibilidad y Especificidad
+cm$byClass[1:2]
+```
+
+- MATRIZ TEST:
+
+```{r}
+probs_test <-predict(modeloClasif005podado, data_test, type="prob")
+cm_test<-confusionMatrix(predict(modeloClasif005podado, newdata=data_test, type="class"),data_test$y)
+
+#Matriz de confusión
+cm_test$table
+#Accuracy y Kappa
+cm_test$overall[1:2]
+#Sensibilidad y Especificidad
+cm_test$byClass[1:2]
+```
+
+
+>Evaluo ahora el AUC que es una medida que no depende el punto de corte:
+
+```{r}
+#TRAIN
+multiclass.roc(data_train$y,
+    predict(modeloClasif005podado,data_train,type="prob"))$auc
+
+#TEST
+multiclass.roc(data_test$y,
+    predict(modeloClasif005podado,data_test,type="prob"))$auc
+```
+
+El modelo sin podar alcanzaba un AUC de 0.90en train y 0.88en test con un árbol de 28 hojas. Tras la poda, el nuevo modelo reduce la complejidad a 12 hojas y obtiene AUCs de 0.877en train y 0.8603 en test. La diferencia en rendimiento es mínima, pero la reducción en el tamaño del árbol es muy grande. Esto significa que el modelo podado es mucho más simple y, aun así, mantiene prácticamente la misma capacidad predictiva, por lo que resulta claramente preferible al modelo original.
+
+### Importancia de variables
+
+```{r}
+barplot(modeloClasif005podado$variable.importance/sum(modeloClasif005podado$variable.importance), las=2)
+```
+
+En la gráfica se observa que duration es, con diferencia, la variable más importante del modelo, aportando más del doble que cualquier otra. Esto encaja con lo visto en los árboles: la duración de la llamada es el factor que más influye en la probabilidad de éxito. Después aparece month, que también tiene un peso relevante, seguido de contact y poutcome, aunque con una contribución bastante menor. Por último, housing y day apenas aportan información al modelo. En conjunto, el gráfico muestra que la mayor parte de la capacidad predictiva del árbol se basa en unas pocas variables clave, mientras que el resto tiene un efecto muy limitado.
+
+### Gestion de ausentes
+
+```{r}
+set.seed(12345)
+modelo005podadoausentes<-rpart(y~., data=data_train, method = "anova", 
+                  minbucket=ceiling(0.005*nrow(data_train)),cp=0.0034,
+                  maxsurrogate = 2, maxcompete=0)
+summary(modelo005podadoausentes)
+```
+
+## Árboles random forest
+
+
+>Empezamos con un RF estandar: 500 arboles, 5% de tamaño de hoja y el mtry por defecto que en este caso al ser un RF de clasificacion sera la raiz del numero de variables en este caso 4 aproximadamente.
+
+```{r}
+set.seed(12345)
+RF5<-randomForest(y~., data=data_train, keep.inbag = TRUE,
+                                 nodesize=ceiling(0.05*nrow(data_train)))
+print(RF5)
+```
+
+Conseguimos una tasa de error del 15.69% aproximadamente, y en este caso vemos como el modelo falla mas en clasificar las observaciones de no que los de si
+
+Vamos a ver que tal funciona el auc y el kappa segun el numero de arboles para decidir cuantos necesito
+
+```{r}
+auxtask <- makeClassifTask(data = data_train, target = "y")
+results5 <- OOBCurve(RF5, measures = list(auc,kappa),
+                    task = auxtask, data = data_train)
+plot(results5$auc, ylab = "oob-auc", xlab = "ntrees")
+```
+
+```{r}
+results5$auc[c(1,50,100,200,300,400,500)]
+```
+
+vemos que con 100 o incluso con 50 el auc es ya casi el mismo y no mejora por añadir mas arboles
+
+```{r}
+plot(results5$kappa, ylab = "oob-kappa", xlab = "ntrees")
+
+```
+
+```{r}
+results5$kappa[c(1,50,100,200,300,400,500)]
+
+```
+
+En el caso del kappa parece que seria mejor trabajar con 100 donde parece que se estabiliza aunq parece que el mejor kappa esta en torno a los 150 arboles
+
+
+Vamos ahora a reducir el tamaño de hoja a ver si asi mejora nuestro bosque
+
+```{r}
+set.seed(12345)
+RF1<-randomForest(y~., data=data_train,
+                                          keep.inbag = TRUE,
+                                          nodesize=ceiling(0.01*nrow(data_train)))
+results1 <- OOBCurve(RF1, measures = list(auc,kappa),
+                    task = auxtask, data = data_train)
+set.seed(12345)
+RF05<-randomForest(y~., data=data_train,
+                                          keep.inbag = TRUE,
+                                          nodesize=ceiling(0.005*nrow(data_train)))
+results05 <- OOBCurve(RF05, measures = list(auc,kappa),
+                    task = auxtask, data = data_train)
+# Si es necesario, reajusta el ylim
+plot(RF1$err.rate[,1], ylab = "Tasa de fallo", ylim=c(0.07,0.3))
+points(RF5$err.rate[,1], col="red")
+points(RF05$err.rate[,1], col="green")
+```
+
+```{r}
+plot(results1$auc, ylab = "oob-auc", xlab = "ntrees")
+points(results5$auc, col="red")
+points(results05$auc, col="green")
+```
+
+```{r}
+plot(results1$kappa, ylab = "oob-auc", xlab = "ntrees")
+points(results5$kappa, col="red")
+points(results05$kappa, col="green")
+```
+
+Parece que el tamaño de hoja queda claro que con 1% funciona mejor que el 5% pero no hace falta hacer el 0.05% y podemos concluir que 100 arboles parece un tamaño optimo de arboles
+
+Ahora pasamos a ver cual parece el numero optimo de mtry es decir de numero de variables que elige aleatoriamente para cada division en el arbol
+
+```{r}
+future::plan(multisession, workers=detectCores() - 1)
+mtryValues<-floor(seq(2,ncol(data_train)-1, length.out=10))
+
+nt<-100
+tunningRF<- future_map(mtryValues, 
+                         ~ {set.seed(12345);
+                           randomForest(y~., data=data_train,
+                                        keep.inbag = TRUE,
+                             nodesize=ceiling(0.01*nrow(data_train)),
+                             ntree=nt,
+                             mtry=.x)}
+                         )
+plan(sequential)
+
+error_rate<-sapply(tunningRF, function(x) x$err.rate[nt,1])
+plot(mtryValues,error_rate,type="b")
+```
+
+```{r}
+AUCs<-sapply(tunningRF, function(x) OOBCurve(x, measures = list(auc, kappa),
+                         task = auxtask, data = data_train)$auc[nt])
+plot(mtryValues, AUCs, type="b")
+```
+
+```{r}
+Kappas<-sapply(tunningRF, function(x) OOBCurve(x, measures = list(auc, kappa),
+                         task = auxtask, data = data_train)$kappa[nt])
+plot(mtryValues, Kappas, type="b")
+```
+
+Hemos visto como funciona lso distintos mtry en error_rate, AUC y Kappa y aunque las escalas son bastante pequeñas, decidimos quedarnos con 7 ya que es la mejor opcion para la tasa de error, el kappa y es la segunda mejor opcion en el auc
+
+```{r}
+RF_def<-tunningRF[[which(mtryValues==7)]]
+print(RF_def)
+```
+
+Vemos como el modelo definitivo mejora la tasa de error
+
+### evaluacion del modelo
+
+
+- MATRIZ DE CONFUSIÓN:
+
+```{r}
+
+```
+
+
+
+
+- AUC 
+
+```{r}
+multiclass.roc(data_train$y,
+    predict(RF_def,data_train,type="prob"))$auc
+```
+
+
+```{r}
+multiclass.roc(data_test$y,
+    predict(RF_def,data_test,type="prob"))$auc
+```
+- perfe 
+
+### importancia de variables
+
+por ultimo vemos importancia de variables
+
+```{r}
+barplot(t(RF_def$importance)/sum(RF_def$importance), las=2)
+
+```
+
+Por ultimo aqui en importancia de variables vemos como gracias a ser un RF todas las variables participan y que la que mas importancia tiene es duration que es capaz de mejorar el 'no modelo' mas de un 40%
+
+## Modelo Gradient Boosting
+
+### poner numero
+
+```{r}
+# Restamos 1 porque esta función recodifica los 0s como 1s
+data_train$y<-as.numeric(data_train$y)-1
+data_test$y<-as.numeric(data_test$y)-1
+```
+
+
+### primer modelo
+
+```{r}
+set.seed(12345)
+gbm_clasif_5 <- gbm(
+  formula = y~., data=data_train,
+  distribution = "bernoulli",
+  train.fraction = 0.75,
+  n.trees = 5000,
+  shrinkage = 0.1,
+  bag.fraction = 1,
+  interaction.depth = 3,
+  n.minobsinnode = ceiling(0.05*nrow(data_train))
+)
+
+print(gbm_clasif_5)
+```
+El modelo ha entrenado 5000 árboles, pero el mejor resultado en el set de prueba se obtuvo realmente en la iteración 585, que es el punto óptimo antes de empezar a sobreajustar. De las 17 variables introducidas, 16 tuvieron influencia real (una quedó descartada con influencia cero). En conclusión, el modelo está aprendiendo bien, pero es evidente que no hacen falta tantas iteraciones, ya que el máximo rendimiento se alcanza mucho antes del final.
+
+```{r}
+opt_clasif_gbm5<-gbm.perf(gbm_clasif_5)
+abline(h=gbm_clasif_5$valid.error[opt_clasif_gbm5], lty=2, col="darkgray")
+```
+
+- La línea azul marca el punto donde el error de validación es mínimo, que ocurre alrededor del árbol 585. A partir de ahí el modelo empieza a sobreajustar y el error vuelve a subir(como acabo de comentar justo antes). Esto significa que se podrían usar menos árboles sin perder capacidad predictiva, incluso podríamos simplificar el modelo y hacerlo más estable manteniendo un rendimiento prácticamente igual. Podríamos reducir el número de árboles 100%. 
+
+### rejilla
+
+```{r}
+hyper_grid <- expand.grid(
+  shrinkage = c(0.3, 0.1, 0.05),
+  interaction.depth = c(2,4 ,6),
+  n.minobsinnode = c(ceiling(0.01*nrow(data_train)), ceiling(0.05*nrow(data_train)), ceiling(0.02*nrow(data_train)))
+)
+```
+
+### construimos los distintos modelos
+
+```{r}
+future::plan(multisession, workers=detectCores() - 1)
+
+set.seed(12345)
+tunningGB<- future_map(1:nrow(hyper_grid),
+                         ~ {set.seed(12345);
+                           gbm(formula = y~., data=data_train,
+                               distribution = "bernoulli",
+                               n.trees = 5000,
+                               train.fraction = 0.75,
+                               shrinkage = hyper_grid$shrinkage[.x],
+                               bag.fraction = 1,
+                               interaction.depth = hyper_grid$interaction.depth[.x],
+                               n.minobsinnode = hyper_grid$n.minobsinnode[.x]
+                         )}
+                       )
+
+plan(sequential)
+```
+- graficamos
+
+```{r}
+resultado <- map_df(1:nrow(hyper_grid),
+                    function(x) {
+                      data.frame(
+                        shrinkage = as.factor(hyper_grid$shrinkage[x]),
+                        interaction.depth = as.factor(hyper_grid$interaction.depth[x]),
+                        n.minobsinnode = as.factor(hyper_grid$n.minobsinnode[x]),
+                        ntrees = 1:5000,
+                        dev = tunningGB[[x]]$valid.error
+                      )
+
+                    }
+
+)
+
+ggplot(data=resultado, aes(x=ntrees, y=dev, col=shrinkage))+
+  geom_line(lwd=1.1)+
+  geom_hline(yintercept = min(resultado$dev))+
+  facet_grid(interaction.depth ~ n.minobsinnode)
+```
+
+- Tabla de resultados
+
+```{r}
+resultado %>%
+     group_by(interaction.depth, n.minobsinnode, shrinkage) %>%
+     slice_min(dev, n = 1)%>%
+     arrange(dev)
+```
+
+- Me quedo con el modelo que tiene shrinkage 0.1, profundidad 6 y n.minobsinnode 78, porque es el que consigue la deviance más baja de todos (0.6276482). Este rendimiento óptimo se alcanza utilizando 341 árboles. Aunque existen otras combinaciones con menos árboles, este es indiscutiblemente el que mejor ajusta. Dado que la diferencia de coste computacional es irrelevante para un ordenador actual, priorizamos el rendimiento predictivo y nos quedamos con el mejor resultado.
+
+### definitivo
+
+```{r}
+optComb<-which((hyper_grid$shrinkage==0.1)&(hyper_grid$interaction.depth==6)&(hyper_grid$n.minobsinnode==78))
+print(tunningGB[[optComb]])
+```
+```{r}
+opt_gbm<-gbm.perf(tunningGB[[optComb]])
+abline(h=tunningGB[[optComb]]$valid.error[opt_gbm], lty=2, col="gray")
+```
+
+- podríamos incluso poner menos pero bueno es el mejor y ya.
+
+- lo creamos
+
+```{r}
+set.seed(12345)
+gbm_clasif_opt<- gbm(
+  formula = y~., data=data_train,
+  distribution = "bernoulli",
+  train.fraction = 1,
+  n.trees = 341,
+  shrinkage = 0.1,
+  bag.fraction = 1,
+  interaction.depth = 6,
+  n.minobsinnode = 78
+)
+
+print(gbm_clasif_opt)
+```
+### evaluación
+
+- AUC
+
+```{r}
+#train
+pROC::multiclass.roc(data_train$y,
+    predict(gbm_clasif_opt,data_train,type="response"))$auc
+
+#test
+pROC::multiclass.roc(data_test$y,
+    predict(gbm_clasif_opt,data_test,type="response"))$auc
+```
+
+- MATRIZ DE CONFUSIÓN
+
+
+```{r}
+probs <-predict(gbm_clasif_opt, data_train, type="response")
+
+# Si la variable tiene más de dos niveles (o es ordinal), cambia el código por lo estudiado en el Tema 1
+cm<-confusionMatrix(data=as.factor(ifelse(probs>=0.5,1,0)), reference=as.factor(data_train$y))
+
+cm$table
+cm$overall[1:2]
+cm$byClass[1:2]
+```
+
+
+```{r}
+probs <-predict(gbm_clasif_opt, data_test, type="response")
+
+# Si la variable tiene más de dos niveles (o es ordinal), cambia el código por lo estudiado en el Tema 1
+cm<-confusionMatrix(data=as.factor(ifelse(probs>=0.5,1,0)), reference=as.factor(data_test$y))
+
+cm$table
+cm$overall[1:2]
+cm$byClass[1:2]
+```
+### Importancia de variables
+
+```{r}
+summary(gbm_clasif_opt, las=2, cex.names=.5)
+```
+
+### pdp
+
+>Var más importante:
+
+```{r}
+plot(gbm_clasif_opt, type="response", i.var = "duration")
+```
+
+
+
+>Segunda var más importante:
+
+```{r}
+plot(gbm_clasif_opt, type="response", i.var = "month")
+```
+
+
+
+>Las dos más importantes juntas:
+
+```{r}
+plot(gbm_clasif_opt, type="response", i.var = c("duration","month"))
+```
+
+
+
+
+>Var menos importante:
+
+```{r}
+plot(gbm_clasif_opt, type="response", i.var = "prev_contact")
+```
+
+
+
+
+
